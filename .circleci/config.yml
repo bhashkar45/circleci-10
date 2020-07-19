@@ -1,95 +1,102 @@
-#version: 2
-jobs:
-  deployment:
-    staging:
-      branch: master
-      codedeploy:
-        my-app:
-          application_root: /
-          revision_location:
-            revision_type: S3
-            s3_location:
-              bucket: s3awscircleci
-              key_pattern: apps/my-app-{SHORT_COMMIT}-{BUILD_NUM}
-          region: us-east-1
-          deployment_group: staging-instances
-          deployment_config: CodeDeployDefault.AllAtOnce
-  workflows:
-    version: 2
-    workflow:
-      jobs:
-       - deployment
-#version: 2
-#jobs:
-  #deploy:
-    #working_directory: ~/project
-    #docker:
-      #- image: circleci/node:6.10-browsers
-    #steps:
-      #- run:
-          #name: Show current branch
-          #command: echo ${CIRCLE_BRANCH}
-      #- restore_cache:
-          #key: v1-dist-{{ .Environment.CIRCLE_BRANCH }}-{{ .Environment.CIRCLE_SHA1
-            #}}
-      #- run:
-          #name: Install aws cli
-          #command: sudo apt-get -y -qq install awscli
-      #- run:
-          #name: Setting Signature Version 4 for S3 Request Authentication
-          #command: aws configure set default.s3.N.Virginia_version s3v4
-      #- run:
-          #name: Deploy to S3
-          #command: |
-              #if [ "${CIRCLE_BRANCH}" == "develop" ]; then
-                  #aws --region us-east-1 s3 sync ~/project s3://s3awscirclecidemo/ --delete
-              #elif [ "${CIRCLE_BRANCH}" == "staging" ]; then
-                  #aws --region us-east-1 s3 sync ~/project s3://s3awscirclecidemo/ --delete
-              #elif [ "${CIRCLE_BRANCH}" == "master" ]; then
-                 #aws --region us-east-1 s3 sync ~/project s3://s3awscirclecidemo/ --delete
-              #fi
-#workflows:
-  #version: 2
-  #workflow:
-    #jobs:
-      #- deploy
-#jobs:
-  #build:
-    #docker:
-      #- image: circleci/ruby:2.4
-    #working_directory: /tmp/circleci-10
-    #steps:
-      #- checkout
-      #- run: sudo apt-get install python3 -y
-      #- store_artifacts:
-          #path: /tmp/circleci-10
-          #destination: /tmp/circleci-10
+version: 2.0
 
-  #deploy:
-    #machine:
-      #enabled: true
-    #steps:
-      #- checkout
-      #- run: sudo apt-get install apache2 -y
-      ##- run:
-          ##name: Deploy Over SSH
-          ##command: |
-            ##echo $CIRCLE_BUILD_NUM
-            ##ssh ubuntu@52.91.20.223 BUILD_NO="$CIRCLE_BUILD_NUM" /bin/bash < "/home/circleci/project"
-      #- run:
-          #name: conditionally run a deploy job
-          #command: |
-            #curl -u ${CIRCLE_API_USER_TOKEN} \
-            #-d build_parameters[CIRCLE_JOB]=deploy_docker \
-            #https://circleci.com/api/v1.1/project/github/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME/tree/$CIRCLE_BRANCH
-#workflows:
-  #version: 2
-  #workflow-test:
-    #jobs:
-      #- build
-      #- deploy:
-          #requires:
-            #- build
-          #filters:
-            #branches:
-              #only: staging
+jobs:
+  checkout_code:
+    docker:
+      - image: circleci/ruby:2.4-node-jessie
+      - image: circleci/postgres:9.4.12-alpine
+    working_directory: ~/circleci-demo-workflows
+    steps:
+      - checkout
+      - save_cache:
+          key: v1-repo-{{ .Environment.CIRCLE_SHA1 }}
+          paths:
+            - ~/circleci-demo-workflows
+
+  bundle_dependencies:
+    docker:
+      - image: circleci/ruby:2.4-node-jessie
+      - image: circleci/postgres:9.4.12-alpine
+    working_directory: ~/circleci-demo-workflows
+    steps:
+      - restore_cache:
+          key: v1-repo-{{ .Environment.CIRCLE_SHA1 }}
+      - restore_cache:
+          key: v1-bundle-{{ checksum "Gemfile.lock" }}
+      - run: bundle install --path vendor/bundle
+      - save_cache:
+          key: v1-bundle-{{ checksum "Gemfile.lock" }}
+          paths:
+            - ~/circleci-demo-workflows/vendor/bundle
+
+  rake_test:
+    docker:
+      - image: circleci/ruby:2.4-node-jessie
+      - image: circleci/postgres:9.4.12-alpine
+    working_directory: ~/circleci-demo-workflows
+    steps:
+      - restore_cache:
+          key: v1-repo-{{ .Environment.CIRCLE_SHA1 }}
+      - restore_cache:
+          key: v1-bundle-{{ checksum "Gemfile.lock" }}
+      - run: bundle --path vendor/bundle
+      - run: bundle exec rake db:create db:schema:load
+      - run:
+          name: Run tests
+          command: bundle exec rake
+
+  precompile_assets:
+    docker:
+      - image: circleci/ruby:2.4-node-jessie
+      - image: circleci/postgres:9.4.12-alpine
+    working_directory: ~/circleci-demo-workflows
+    steps:
+      - restore_cache:
+          key: v1-repo-{{ .Environment.CIRCLE_SHA1 }}
+      - restore_cache:
+          key: v1-bundle-{{ checksum "Gemfile.lock" }}
+      - run: bundle --path vendor/bundle
+      - run:
+          name: Precompile assets
+          command: bundle exec rake assets:precompile
+      - save_cache:
+          key: v1-assets-{{ .Environment.CIRCLE_SHA1 }}
+          paths:
+            - ~/circleci-demo-workflows/public/assets
+
+  deploy:
+    machine:
+        enabled: true
+    working_directory: ~/circleci-demo-workflows
+    environment:
+      HEROKU_APP: still-shelf-38337
+    steps:
+      - restore_cache:
+          key: v1-repo-{{ .Environment.CIRCLE_SHA1 }}
+      - restore_cache:
+          key: v1-bundle-{{ checksum "Gemfile.lock" }}
+      - restore_cache:
+          key: v1-assets-{{ .Environment.CIRCLE_SHA1 }}
+      - run:
+          name: Deploy Master to Heroku
+          command: |
+            git push https://heroku:$HEROKU_API_KEY@git.heroku.com/$HEROKU_APP.git master
+
+workflows:
+  version: 2
+  build-and-deploy:
+    jobs:
+      - checkout_code
+      - bundle_dependencies:
+          requires:
+            - checkout_code
+      - rake_test:
+          requires:
+            - bundle_dependencies
+      - precompile_assets:
+          requires:
+            - bundle_dependencies
+      - deploy:
+          requires:
+            - rake_test
+            - precompile_assets
